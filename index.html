@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI股票分析 · Cloudflare稳态版</title>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+  <style>
+    *{box-sizing:border-box}body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Arial,sans-serif;background:#081226;color:#e8eefc} .wrap{max-width:1380px;margin:0 auto;padding:24px} h1{font-size:28px;margin:0 0 8px} .sub{color:#9db0d4;margin-bottom:22px}.panel,.card{background:#0d1b36;border:1px solid #1c2d56;border-radius:22px}.panel{padding:20px;margin-bottom:20px}.row{display:flex;gap:12px;flex-wrap:wrap;align-items:end}.grow{flex:1 1 380px}.label{font-size:14px;color:#b7c7e6;margin:0 0 8px}.input,select,button{height:54px;border-radius:18px;border:1px solid #274178;background:#09142d;color:#fff;font-size:16px;padding:0 16px}.input{width:100%}select{min-width:150px}button{background:#2563eb;border:none;padding:0 22px;font-weight:700;cursor:pointer}.chips{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px}.chip{padding:10px 16px;border-radius:999px;background:#12254a;border:1px solid #223d73;cursor:pointer}.status{margin-top:14px;padding:12px 14px;border-radius:14px;font-size:14px}.ok{background:#0d3a2e;color:#acf0cf}.warn{background:#43270d;color:#ffd8a8}.err{background:#4a1515;color:#ffc7c7}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px;margin:18px 0}.card{padding:18px}.title{font-size:14px;color:#aac0ec;margin-bottom:10px}.big{font-size:26px;font-weight:800;margin-bottom:8px}.badge{display:inline-block;padding:6px 12px;border-radius:999px;font-size:13px;font-weight:700}.buy{background:#0f7a58}.sell{background:#a42c2c}.neutral{background:#4f5d7a}.chart{height:430px;background:#0d1b36;border:1px solid #1c2d56;border-radius:22px;padding:12px}.section-title{font-size:20px;font-weight:800;margin:22px 0 12px}.advice{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px}.small{font-size:13px;color:#9fb3da}.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}.footer{margin:28px 0 10px;color:#8aa0cb;font-size:13px}.hidden{display:none}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1>📈 AI股票分析 · Cloudflare稳态版</h1>
+  <div class="sub">我给你的这版优先解决“慢、容易失败”。做法是：前端静态网页 + Cloudflare Function 统一取数 + 缓存。默认先做好纳指科技七巨头。</div>
+
+  <div class="panel">
+    <div class="row">
+      <div class="grow">
+        <div class="label">股票代码</div>
+        <input id="symbol" class="input" value="AAPL" placeholder="AAPL / MSFT / NVDA / META / AMZN / GOOGL / TSLA" />
+      </div>
+      <div>
+        <div class="label">周期</div>
+        <select id="period">
+          <option value="daily">日线</option>
+          <option value="weekly">周线</option>
+          <option value="monthly">月线</option>
+        </select>
+      </div>
+      <div>
+        <button id="runBtn">开始分析</button>
+      </div>
+    </div>
+    <div class="chips">
+      <div class="chip" data-s="AAPL">AAPL</div>
+      <div class="chip" data-s="MSFT">MSFT</div>
+      <div class="chip" data-s="NVDA">NVDA</div>
+      <div class="chip" data-s="META">META</div>
+      <div class="chip" data-s="AMZN">AMZN</div>
+      <div class="chip" data-s="GOOGL">GOOGL</div>
+      <div class="chip" data-s="TSLA">TSLA</div>
+    </div>
+    <div id="status" class="status warn">准备就绪。首次加载会比后面慢一点，之后会命中缓存。</div>
+  </div>
+
+  <div class="grid" id="cards"></div>
+  <div id="chart" class="chart"></div>
+
+  <div class="section-title">策略面板</div>
+  <div class="advice" id="advice"></div>
+
+  <div class="footer">说明：这版默认是“稳态日线分析器”。专业交易里，我更看重稳定的数据链路、固定的执行规则和风控，而不是伪实时但经常失败的页面。</div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let myChart = echarts.init($("chart"));
+const localCache = new Map();
+
+function ema(values, period){
+  const k = 2/(period+1); const out=[]; let prev=values[0];
+  for(let i=0;i<values.length;i++){ prev = i===0 ? values[0] : values[i]*k + prev*(1-k); out.push(prev); }
+  return out;
+}
+function sma(values, period){
+  return values.map((_,i)=> i<period-1 ? null : values.slice(i-period+1,i+1).reduce((a,b)=>a+b,0)/period);
+}
+function macd(values){
+  const e12=ema(values,12), e26=ema(values,26); const dif=e12.map((v,i)=>v-e26[i]); const dea=ema(dif,9); const hist=dif.map((v,i)=>v-dea[i]);
+  return {dif,dea,hist};
+}
+function obv(closes, volumes){
+  const out=[0]; for(let i=1;i<closes.length;i++){ const delta = closes[i]>closes[i-1]?volumes[i] : closes[i]<closes[i-1]?-volumes[i] : 0; out.push(out[out.length-1]+delta);} return out;
+}
+function atr(highs,lows,closes,period=14){
+  const tr=[]; for(let i=0;i<closes.length;i++){ if(i===0){ tr.push(highs[i]-lows[i]); continue;} tr.push(Math.max(highs[i]-lows[i], Math.abs(highs[i]-closes[i-1]), Math.abs(lows[i]-closes[i-1])));} return sma(tr,period);
+}
+function kdj(closes, highs, lows, n=9){
+  let k=50,d=50; const ks=[], ds=[], js=[];
+  for(let i=0;i<closes.length;i++){
+    if(i<n-1){ ks.push(null); ds.push(null); js.push(null); continue; }
+    const hh=Math.max(...highs.slice(i-n+1,i+1)); const ll=Math.min(...lows.slice(i-n+1,i+1));
+    const rsv = hh===ll ? 50 : ((closes[i]-ll)/(hh-ll))*100;
+    k = (2/3)*k + (1/3)*rsv; d = (2/3)*d + (1/3)*k; const j = 3*k-2*d;
+    ks.push(k); ds.push(d); js.push(j);
+  }
+  return {k:ks,d:ds,j:js};
+}
+function fmt(n){ return Number(n).toFixed(2); }
+function lastValid(arr){ for(let i=arr.length-1;i>=0;i--){ if(arr[i]!=null && !Number.isNaN(arr[i])) return arr[i]; } return null; }
+function pct(a,b){ return b ? ((a-b)/b)*100 : 0; }
+function trendScore(closes, e20, e60, e120, macdObj){
+  let score=0; const c=closes.at(-1), a=e20.at(-1), b=e60.at(-1), cc=e120.at(-1);
+  if(c>a) score+=2; if(c>b) score+=2; if(c>cc) score+=2; if(a>b && b>cc) score+=2;
+  const h=macdObj.hist; if(h.at(-1)>0) score+=1; if(h.at(-1)>h.at(-2)) score+=1;
+  return Math.max(1, Math.min(10, score));
+}
+function detectBullishDivergence(closes, macdHist){
+  if(closes.length<40) return false;
+  const c1=Math.min(...closes.slice(-35,-18)); const c2=Math.min(...closes.slice(-18));
+  const h1=Math.min(...macdHist.slice(-35,-18)); const h2=Math.min(...macdHist.slice(-18));
+  return c2 < c1 && h2 > h1;
+}
+function vpaText(closes, volumes){
+  const p0=closes[closes.length-11], p1=closes.at(-1); const vRecent=volumes.slice(-10).reduce((a,b)=>a+b,0)/10; const vPrev=volumes.slice(-20,-10).reduce((a,b)=>a+b,0)/10;
+  const up = p1 > p0; const volUp = vRecent > vPrev*1.08; const volDown = vRecent < vPrev*0.92;
+  if(up && volUp) return '上涨伴随放量，说明主动性买盘更强，偏健康推进。';
+  if(up && volDown) return '上涨但缩量，更像存量推动，追高性价比一般。';
+  if(!up && volDown) return '回落伴随缩量，较像缩量洗盘，不一定是趋势破坏。';
+  if(!up && volUp) return '回落伴随放量，需警惕高位派发或资金撤退。';
+  return '量价暂时没有给出很强的单边信号。';
+}
+function obvText(closes, obvArr){
+  const pDelta = pct(closes.at(-1), closes[closes.length-15]); const oDelta = pct(obvArr.at(-1), obvArr[obvArr.length-15] || 1);
+  if(pDelta>0 && oDelta<0) return 'OBV 与价格出现顶背离倾向：价格走强但量能跟随不足。';
+  if(pDelta<0 && oDelta>0) return 'OBV 与价格出现底背离倾向：价格偏弱但资金累积改善。';
+  return 'OBV 与价格大体同步，未见明显背离。';
+}
+function aggregateBars(rows, mode){
+  if(mode==='daily') return rows;
+  const groups = [];
+  const map = new Map();
+  for(const r of rows){
+    const d = new Date(r.date+'T00:00:00Z');
+    const key = mode==='weekly'
+      ? `${d.getUTCFullYear()}-W${String(getWeek(d)).padStart(2,'0')}`
+      : `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}`;
+    if(!map.has(key)) map.set(key, []);
+    map.get(key).push(r);
+  }
+  for(const [key, arr] of map.entries()){
+    groups.push({
+      date: arr[arr.length-1].date,
+      open: arr[0].open,
+      high: Math.max(...arr.map(x=>x.high)),
+      low: Math.min(...arr.map(x=>x.low)),
+      close: arr[arr.length-1].close,
+      volume: arr.reduce((a,b)=>a+b.volume,0)
+    });
+  }
+  return groups;
+}
+function getWeek(d){
+  const date = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  const dayNum = date.getUTCDay() || 7; date.setUTCDate(date.getUTCDate() + 4 - dayNum);
+  const yearStart = new Date(Date.UTC(date.getUTCFullYear(),0,1));
+  return Math.ceil((((date - yearStart) / 86400000) + 1)/7);
+}
+
+async function fetchData(symbol, period){
+  const key = `${symbol}_${period}`;
+  if(localCache.has(key)) return localCache.get(key);
+  const res = await fetch(`/api/quote?symbol=${encodeURIComponent(symbol)}&period=${encodeURIComponent(period)}`);
+  const json = await res.json();
+  if(!res.ok || !json.ok) throw new Error(json.error || '数据获取失败');
+  localCache.set(key, json);
+  return json;
+}
+
+function render(payload){
+  const rows = payload.rows;
+  const closes = rows.map(x=>x.close), highs=rows.map(x=>x.high), lows=rows.map(x=>x.low), volumes=rows.map(x=>x.volume), dates=rows.map(x=>x.date);
+  const e20=ema(closes,20), e60=ema(closes,60), e120=ema(closes,120), m=macd(closes), a=atr(highs,lows,closes,14), o=obv(closes,volumes), kd=kdj(closes,highs,lows);
+  const score = trendScore(closes,e20,e60,e120,m);
+  const bullDiv = detectBullishDivergence(closes,m.hist);
+  const lastClose = closes.at(-1), lastAtr = lastValid(a) || 0, lastJ = lastValid(kd.j) || 50;
+  const trendText = e20.at(-1) > e60.at(-1) && e60.at(-1) > e120.at(-1) ? '多头排列' : (e20.at(-1) < e60.at(-1) && e60.at(-1) < e120.at(-1) ? '空头排列' : '均线缠绕/过渡区');
+  const kdjSignal = lastJ < 25 ? '短线超卖' : lastJ > 80 ? '短线超买' : '中性';
+  const stop1 = lastClose - 1.5*lastAtr, stop2 = lastClose - 2*lastAtr, trail = lastClose - 2*lastAtr;
+
+  $('cards').innerHTML = `
+    <div class="card"><div class="title">最新收盘</div><div class="big">$${fmt(lastClose)}</div><div class="small">${payload.symbol} · ${payload.name}</div></div>
+    <div class="card"><div class="title">趋势共振评分</div><div class="big">${score}/10</div><span class="badge ${score>=7?'buy':score<=4?'sell':'neutral'}">${score>=7?'偏强':score<=4?'偏弱':'中性'}</span></div>
+    <div class="card"><div class="title">EMA结构</div><div class="big">${trendText}</div><div class="small mono">EMA20 ${fmt(e20.at(-1))} / EMA60 ${fmt(e60.at(-1))} / EMA120 ${fmt(e120.at(-1))}</div></div>
+    <div class="card"><div class="title">MACD / KDJ</div><div class="big">${bullDiv?'底背离倾向':'未见明显底背离'}</div><div class="small mono">MACD柱 ${fmt(m.hist.at(-1))} · KDJ-J ${fmt(lastJ)} (${kdjSignal})</div></div>
+  `;
+
+  $('advice').innerHTML = `
+    <div class="card"><div class="title">1️⃣ 趋势共振</div><div class="big">${trendText}</div><div class="small">价格相对 EMA20/60/120 的位置：${lastClose>e20.at(-1)?'站上 EMA20，':'失守 EMA20，'}${lastClose>e60.at(-1)?'站上 EMA60，':'失守 EMA60，'}${lastClose>e120.at(-1)?'站上 EMA120。':'失守 EMA120。'}${bullDiv?' MACD 存在底背离倾向。':' MACD 暂未形成明确底背离。'} 技术面综合评分：<b>${score}/10</b>。</div></div>
+    <div class="card"><div class="title">2️⃣ 洞察主力</div><div class="big">VPA / OBV</div><div class="small">${vpaText(closes, volumes)} ${obvText(closes, o)}</div></div>
+    <div class="card"><div class="title">3️⃣ 量化风控</div><div class="big">ATR ${fmt(lastAtr)}</div><div class="small mono">收盘价: ${fmt(lastClose)}\n初始止损(1.5 ATR): ${fmt(stop1)}\n更宽止损(2 ATR): ${fmt(stop2)}\n移动止盈参考(2 ATR 跟踪): ${fmt(trail)}</div></div>
+  `;
+
+  const buyPoints = [];
+  for(let i=25;i<rows.length;i++){
+    if(kd.j[i]!=null && kd.j[i] < 25 && m.hist[i] > m.hist[i-1]) buyPoints.push([dates[i], closes[i], '买']);
+    if(kd.j[i]!=null && kd.j[i] > 80 && m.hist[i] < m.hist[i-1]) buyPoints.push([dates[i], closes[i], '卖']);
+  }
+
+  myChart.setOption({
+    backgroundColor:'transparent',
+    tooltip:{trigger:'axis'},
+    legend:{data:['收盘','EMA20','EMA60','EMA120','信号'],textStyle:{color:'#cfe0ff'}},
+    xAxis:{type:'category',data:dates,axisLabel:{color:'#9fb3da',hideOverlap:true}},
+    yAxis:{type:'value',scale:true,axisLabel:{color:'#cfe0ff'}},
+    grid:{left:55,right:20,top:40,bottom:40},
+    series:[
+      {name:'收盘',type:'line',data:closes,symbol:'none',lineStyle:{width:2}},
+      {name:'EMA20',type:'line',data:e20,symbol:'none'},
+      {name:'EMA60',type:'line',data:e60,symbol:'none'},
+      {name:'EMA120',type:'line',data:e120,symbol:'none'},
+      {name:'信号',type:'scatter',data:buyPoints,symbolSize:22,label:{show:true,formatter:p=>p.data[2],color:'#fff',backgroundColor:'rgba(0,0,0,.45)',padding:[2,8],borderRadius:12}}
+    ]
+  });
+}
+
+async function run(){
+  const symbol = $('symbol').value.trim().toUpperCase(); const period = $('period').value;
+  $('status').className = 'status warn'; $('status').textContent = '正在加载数据...';
+  try{
+    const payload = await fetchData(symbol, period);
+    render(payload);
+    $('status').className = 'status ok';
+    $('status').textContent = `加载成功：${payload.symbol} · ${payload.rows.length} 根K线 · 数据源 ${payload.source} · 已启用边缘缓存`;
+  }catch(e){
+    $('status').className = 'status err'; $('status').textContent = '加载失败：' + e.message;
+  }
+}
+
+document.querySelectorAll('.chip').forEach(el=>el.onclick=()=>{ $('symbol').value = el.dataset.s; run(); });
+$('runBtn').onclick = run;
+run();
+</script>
+</body>
+</html>
